@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -16,6 +17,9 @@ import (
 type provider struct {
 	// azure key vault client
 	clients map[string]*azsecrets.Client
+	// clientsMu serializes lazy client creation so concurrent callers
+	// don't race while reading/writing the clients map.
+	clientsMu sync.Mutex
 }
 
 func New(cfg api.StaticConfig) *provider {
@@ -57,8 +61,11 @@ func (p *provider) GetStringMap(key string) (map[string]interface{}, error) {
 }
 
 func (p *provider) getClientForKeyVault(vaultBaseURL string) (*azsecrets.Client, error) {
-	if val, ok := p.clients[vaultBaseURL]; val != nil || ok {
-		return p.clients[vaultBaseURL], nil
+	p.clientsMu.Lock()
+	defer p.clientsMu.Unlock()
+
+	if client, ok := p.clients[vaultBaseURL]; ok && client != nil {
+		return client, nil
 	}
 
 	cred, err := getTokenCredential()
@@ -66,12 +73,13 @@ func (p *provider) getClientForKeyVault(vaultBaseURL string) (*azsecrets.Client,
 		return nil, err
 	}
 
-	p.clients[vaultBaseURL], err = azsecrets.NewClient(vaultBaseURL, cred, nil)
+	client, err := azsecrets.NewClient(vaultBaseURL, cred, nil)
 	if err != nil {
 		return nil, err
 	}
+	p.clients[vaultBaseURL] = client
 
-	return p.clients[vaultBaseURL], nil
+	return client, nil
 }
 
 func getTokenCredential() (azcore.TokenCredential, error) {

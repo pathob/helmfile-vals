@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/antchfx/jsonquery"
 	"github.com/antchfx/xpath"
@@ -19,6 +20,9 @@ type provider struct {
 	log        *log.Logger
 	docs       map[string]*jsonquery.Node
 	floatAsInt bool
+	// docsMu serializes lazy document fetching so concurrent callers
+	// don't race while reading/writing the docs map.
+	docsMu sync.Mutex
 }
 
 func New(l *log.Logger, cfg api.StaticConfig) *provider {
@@ -87,16 +91,26 @@ func GetUrlFromUri(uri string, protocol string) (string, error) {
 }
 
 func (p *provider) GetJsonDoc(url string) error {
-	if _, ok := p.docs[url]; !ok {
-		doc, err := jsonquery.LoadURL(url)
-		if err != nil {
-			return fmt.Errorf("error fetching json document at %v: %v", url, err)
-		}
-		p.log.Debugf("httpjson: successfully retrieved JSON data from: %s", url)
-		p.docs[url] = doc
+	_, err := p.getJsonDoc(url)
+	return err
+}
+
+func (p *provider) getJsonDoc(url string) (*jsonquery.Node, error) {
+	p.docsMu.Lock()
+	defer p.docsMu.Unlock()
+
+	if doc, ok := p.docs[url]; ok {
+		return doc, nil
 	}
 
-	return nil
+	doc, err := jsonquery.LoadURL(url)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching json document at %v: %v", url, err)
+	}
+	p.log.Debugf("httpjson: successfully retrieved JSON data from: %s", url)
+	p.docs[url] = doc
+
+	return doc, nil
 }
 
 func (p *provider) GetString(uri string) (string, error) {
@@ -104,7 +118,7 @@ func (p *provider) GetString(uri string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	err = p.GetJsonDoc(url)
+	doc, err := p.getJsonDoc(url)
 	if err != nil {
 		return "", err
 	}
@@ -115,7 +129,7 @@ func (p *provider) GetString(uri string) (string, error) {
 
 	returnValue := ""
 	var values []string
-	node, err := jsonquery.Query(p.docs[url], xpathQuery)
+	node, err := jsonquery.Query(doc, xpathQuery)
 	if err != nil || node == nil {
 		return "", fmt.Errorf("unable to query doc for value with xpath query using %v", uri)
 	}
